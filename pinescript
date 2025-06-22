@@ -1,0 +1,188 @@
+//@version=6
+strategy("Nordic Relative Strength Strategy", 
+         overlay=true, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=20,
+         initial_capital=10000,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1)
+
+// ===== Input Parameters =====
+
+// Index Selection
+indexSources = ["OMXS30", "OSEBX", "OMXC20", "OMXN40", "OMXSPI"]
+selectedIndex = input.string("OMXS30", "Reference Index", options=indexSources)
+indexTicker = selectedIndex == "OMXS30" ? "OMXS30.INDX" : 
+              selectedIndex == "OSEBX" ? "OSEBX.INDX" : 
+              selectedIndex == "OMXC20" ? "OMXC20.INDX" : 
+              selectedIndex == "OMXN40" ? "OMXN40.INDX" : "OMXSPI.INDX"
+
+// Relative Strength Parameters
+rsPeriod = input.int(20, "RS Calculation Period", minval=1, maxval=100)
+smoothingPeriod = input.int(5, "Smoothing Period", minval=1, maxval=50)
+signalStrength = input.float(1.2, "Signal Strength Threshold", minval=0.5, maxval=3.0, step=0.1)
+
+// Pivot Points Parameters
+pivotLeftBars = input.int(5, "Pivot Left Bars", minval=1, maxval=20)
+pivotRightBars = input.int(5, "Pivot Right Bars", minval=1, maxval=20)
+
+// Risk Management Parameters (Based on Backtested Results)
+useAtrSl = input.bool(true, "Use ATR-based Stop Loss")
+useAtrTp = input.bool(true, "Use ATR-based Take Profit")
+useTrailStop = input.bool(true, "Use Trailing Stop")
+atrPeriod = input.int(14, "ATR Period", minval=1, maxval=100)
+
+// Optimized ATR Multipliers (Derived from MAE/MFE Analysis)
+slMultiplier = input.float(2.8, "Stop Loss ATR Multiplier", minval=0.5, maxval=10.0, step=0.1)
+tpMultiplier = input.float(4.7, "Take Profit ATR Multiplier", minval=0.5, maxval=10.0, step=0.1)
+trailMultiplier = input.float(2.0, "Trailing Stop ATR Multiplier", minval=0.5, maxval=10.0, step=0.1)
+
+// Fixed % Stop Loss/Take Profit as alternative
+fixedSl = input.float(1.75, "Fixed Stop Loss %", minval=0.1, maxval=10.0, step=0.1)
+fixedTp = input.float(4.75, "Fixed Take Profit %", minval=0.1, maxval=20.0, step=0.1)
+
+// Visual Parameters
+showLabels = input.bool(true, "Show Trade Labels")
+showTable = input.bool(true, "Show Info Table")
+
+// ===== Calculations =====
+
+// Get index data
+indexClose = request.security(indexTicker, timeframe.period, close)
+indexOpen = request.security(indexTicker, timeframe.period, open)
+
+// Calculate stock and index returns
+stockReturn = (close - close[rsPeriod]) / close[rsPeriod] * 100
+indexReturn = (indexClose - indexClose[rsPeriod]) / indexClose[rsPeriod] * 100
+
+// Calculate relative strength
+rs = stockReturn - indexReturn
+rsSmoothed = ta.sma(rs, smoothingPeriod)
+
+// Normalize RS to a 0-1 scale for better interpretation across different volatility regimes
+rsMax = ta.highest(rs, 252)  // ~1 year max
+rsMin = ta.lowest(rs, 252)   // ~1 year min
+rsNormalized = rsMax != rsMin ? (rs - rsMin) / (rsMax - rsMin) : 0.5
+
+// Index green/red day classification
+indexGreenDay = indexClose > indexOpen
+indexRedDay = indexClose < indexOpen
+
+// Stock classification based on relative performance
+isDefensive = ta.sma(rs * (indexRedDay ? 1 : 0), 20) > 0.7  // Outperforms on red days
+isAggressive = ta.sma(rs * (indexGreenDay ? -1 : 0), 20) < -0.7  // Underperforms on green days
+
+// Pivot points for entry signals
+pivotHigh = ta.pivothigh(high, pivotLeftBars, pivotRightBars)
+pivotLow = ta.pivotlow(low, pivotLeftBars, pivotRightBars)
+
+// ATR for dynamic stop loss and take profit
+atr = ta.atr(atrPeriod)
+
+// ===== Trading Signals =====
+
+// Long signal: Defensive stock showing strength on green index day + price breaks above pivot high
+longCondition = isDefensive and indexGreenDay and rs > signalStrength and ta.crossover(close, ta.valuewhen(pivotHigh, high, 0))
+
+// Short signal: Aggressive stock showing weakness on red index day + price breaks below pivot low
+shortCondition = isAggressive and indexRedDay and rs < -signalStrength and ta.crossunder(close, ta.valuewhen(pivotLow, low, 0))
+
+// ===== Entry Orders =====
+
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    if (showLabels)
+        label.new(bar_index, low, text="LONG", color=color.green, textcolor=color.white, style=label.style_label_up)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    if (showLabels)
+        label.new(bar_index, high, text="SHORT", color=color.red, textcolor=color.white, style=label.style_label_down)
+
+// ===== Historical Backtested Stop Loss & Take Profit Logic =====
+
+// Calculate stop loss and take profit levels
+longStopPrice = useAtrSl ? close - (atr * slMultiplier) : close * (1 - fixedSl/100)
+longTakeProfitPrice = useAtrTp ? close + (atr * tpMultiplier) : close * (1 + fixedTp/100)
+
+shortStopPrice = useAtrSl ? close + (atr * slMultiplier) : close * (1 + fixedSl/100)
+shortTakeProfitPrice = useAtrTp ? close - (atr * tpMultiplier) : close * (1 - fixedTp/100)
+
+// Set exit orders for long positions
+if (strategy.position_size > 0)
+    if (useTrailStop)
+        // Trailing stop for long position based on backtested optimal multiplier
+        strategy.exit("Long TS+TP", "Long", trail_points=math.round(atr * trailMultiplier / syminfo.mintick), 
+                     trail_offset=math.round(atr * trailMultiplier / syminfo.mintick), 
+                     limit=longTakeProfitPrice)
+    else
+        // Fixed stop loss and take profit
+        strategy.exit("Long SL+TP", "Long", stop=longStopPrice, limit=longTakeProfitPrice)
+
+// Set exit orders for short positions
+if (strategy.position_size < 0)
+    if (useTrailStop)
+        // Trailing stop for short position based on backtested optimal multiplier
+        strategy.exit("Short TS+TP", "Short", trail_points=math.round(atr * trailMultiplier / syminfo.mintick), 
+                     trail_offset=math.round(atr * trailMultiplier / syminfo.mintick), 
+                     limit=shortTakeProfitPrice)
+    else
+        // Fixed stop loss and take profit
+        strategy.exit("Short SL+TP", "Short", stop=shortStopPrice, limit=shortTakeProfitPrice)
+
+// ===== Visualization =====
+
+// Color background based on stock classification
+bgcolor(isDefensive ? color.new(color.green, 90) : isAggressive ? color.new(color.red, 90) : na)
+
+// Plot pivot points for entry signals
+plotshape(pivotHigh, "Pivot High", shape.circle, location.abovebar, color.new(color.blue, 0), size=size.tiny)
+plotshape(pivotLow, "Pivot Low", shape.circle, location.belowbar, color.new(color.blue, 0), size=size.tiny)
+
+// Create information table
+if (showTable)
+    var table infoTable = table.new(position.top_right, 6, 6, color.new(color.gray, 80))
+    
+    table.cell(infoTable, 0, 0, "Nordic RS Strategy", text_color=color.white, bgcolor=color.new(color.blue, 80))
+    table.cell(infoTable, 1, 0, selectedIndex, text_color=color.white)
+    
+    table.cell(infoTable, 0, 1, "Relative Strength", text_color=color.white)
+    table.cell(infoTable, 1, 1, str.tostring(rs, "#.##"), text_color=rs > 0 ? color.green : color.red)
+    
+    table.cell(infoTable, 0, 2, "Classification", text_color=color.white)
+    stockClass = isDefensive ? "Defensive" : isAggressive ? "Aggressive" : "Neutral"
+    table.cell(infoTable, 1, 2, stockClass, text_color=isDefensive ? color.green : isAggressive ? color.red : color.gray)
+    
+    table.cell(infoTable, 0, 3, "Index Direction", text_color=color.white)
+    table.cell(infoTable, 1, 3, indexGreenDay ? "Green" : indexRedDay ? "Red" : "Flat", 
+               text_color=indexGreenDay ? color.green : indexRedDay ? color.red : color.gray)
+    
+    table.cell(infoTable, 0, 4, "Stop Loss", text_color=color.white)
+    table.cell(infoTable, 1, 4, strategy.position_size > 0 ? str.tostring(longStopPrice, "#.##") : 
+                               strategy.position_size < 0 ? str.tostring(shortStopPrice, "#.##") : "N/A", 
+               text_color=color.red)
+    
+    table.cell(infoTable, 0, 5, "Take Profit", text_color=color.white)
+    table.cell(infoTable, 1, 5, strategy.position_size > 0 ? str.tostring(longTakeProfitPrice, "#.##") : 
+                               strategy.position_size < 0 ? str.tostring(shortTakeProfitPrice, "#.##") : "N/A", 
+               text_color=color.green)
+
+// Plot relative strength line
+plot(0, "Zero Line", color.gray, 1, plot.style_line)
+plot(rs, "Relative Strength", color.blue, 2)
+plot(signalStrength, "Signal Threshold", color.green, 1, plot.style_line)
+plot(-signalStrength, "Signal Threshold", color.red, 1, plot.style_line)
+
+// ===== Strategy Performance Info =====
+if (barstate.islastconfirmedhistory)
+    // Calculate MAE/MFE statistics for optimization with proper error handling
+    avgMAE = strategy.closedtrades > 0 ? strategy.max_drawdown / strategy.closedtrades : 0
+    avgMFE = strategy.closedtrades > 0 ? (strategy.netprofit / strategy.initial_capital * 100) / strategy.closedtrades : 0
+    
+    label.new(bar_index, low, 
+             "Nordic RS Strategy Performance\n" +
+             "Avg MAE: " + str.tostring(avgMAE, "#.##") + "%\n" +
+             "Avg MFE: " + str.tostring(avgMFE, "#.##") + "%\n" +
+             "Risk-Reward: " + str.tostring(math.abs(avgMAE) > 0 ? avgMFE/math.abs(avgMAE) : 0, "#.##") + "\n" +
+             "Win Rate: " + str.tostring(strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0, "#.##") + "%",
+             color=color.blue, textcolor=color.white, style=label.style_label_left)
