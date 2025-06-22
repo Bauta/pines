@@ -9,13 +9,16 @@ strategy("Nordic Relative Strength Strategy",
 
 // ===== Input Parameters =====
 
-// Index Selection
-indexSources = ["OMXS30", "OSEBX", "OMXC20", "OMXN40", "OMXSPI"]
-selectedIndex = input.string("OMXS30", "Reference Index", options=indexSources)
-indexTicker = selectedIndex == "OMXS30" ? "OMXS30.INDX" : 
-              selectedIndex == "OSEBX" ? "OSEBX.INDX" : 
-              selectedIndex == "OMXC20" ? "OMXC20.INDX" : 
-              selectedIndex == "OMXN40" ? "OMXN40.INDX" : "OMXSPI.INDX"
+// Index Selection - Final corrected version
+selectedIndex = input.string("OMXS30", "Reference Index", 
+                           options=["OMXS30", "OSEBX", "OMXC20", "OMXN40", "OMXSPI"])
+
+indexTicker = selectedIndex == "OMXS30" ? "OMXSTO:OMXS30" : 
+              selectedIndex == "OSEBX" ? "OSL:OSEBX" : 
+              selectedIndex == "OMXC20" ? "OMXCOP:OMXC20" : 
+              selectedIndex == "OMXN40" ? "OMXNORDIC:OMXN40" : "OMXSTO:OMXSPI"
+
+
 
 // Relative Strength Parameters
 rsPeriod = input.int(20, "RS Calculation Period", minval=1, maxval=100)
@@ -82,11 +85,28 @@ atr = ta.atr(atrPeriod)
 // ===== Trading Signals =====
 
 // Long signal: Defensive stock showing strength on green index day + price breaks above pivot high
-longCondition = isDefensive and indexGreenDay and rs > signalStrength and ta.crossover(close, ta.valuewhen(pivotHigh, high, 0))
+// Create boolean condition for pivot detection
+pivotHighFound = not na(pivotHigh)
+
+// Define long condition using valid boolean for ta.valuewhen
+longCondition = isDefensive 
+     and indexGreenDay 
+     and rs > signalStrength 
+     and ta.crossover(
+          close, 
+          ta.valuewhen(pivotHighFound, high, 0)
+     )
 
 // Short signal: Aggressive stock showing weakness on red index day + price breaks below pivot low
-shortCondition = isAggressive and indexRedDay and rs < -signalStrength and ta.crossunder(close, ta.valuewhen(pivotLow, low, 0))
+pivotLowFound = not na(pivotLow)
 
+shortCondition = isAggressive 
+     and indexRedDay 
+     and rs < -signalStrength 
+     and ta.crossunder(
+          close, 
+          ta.valuewhen(pivotLowFound, low, 0)
+     )
 // ===== Entry Orders =====
 
 if (longCondition)
